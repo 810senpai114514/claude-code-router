@@ -1,8 +1,26 @@
-ARG NODE_IMAGE=node:22-bookworm
-ARG RUNTIME_NODE_IMAGE=node:22-bookworm-slim
+ARG BUILD_NODE_IMAGE=node:22-bookworm
+ARG RUNTIME_NODE_IMAGE=node:22-slim
 
-FROM ${NODE_IMAGE} AS build
+# ============================================================
+# Stage 1: Build everything (core server + UI assets)
+# ============================================================
+FROM ${BUILD_NODE_IMAGE} AS build
 WORKDIR /app
+
+# 代理 & npm 镜像（ZTE 内网）
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+ENV NODEJS_ORG_MIRROR=https://registry.npmmirror.com/-/binary/node
+RUN npm config set registry https://artsz.zte.com.cn/artifactory/api/npm/public-npm-virtual/ && \
+    npm config set proxy ${HTTP_PROXY} && \
+    npm config set https-proxy ${HTTPS_PROXY} && \
+    npm config set noproxy ${NO_PROXY} && \
+    echo "no_proxy=localhost,127.0.0.1,10.0.0.0/8,artsz.zte.com.cn" >> ~/.npmrc && \
+    echo "unsafe-perm=true" >> ~/.npmrc
 
 COPY package.json package-lock.json ./
 COPY packages/cli/package.json packages/cli/package.json
@@ -14,62 +32,73 @@ RUN npm ci
 COPY . .
 RUN npm run build:docker
 
-FROM ${NODE_IMAGE} AS production-deps
+FROM ${BUILD_NODE_IMAGE} AS production-deps
 WORKDIR /app
 ENV NODE_ENV=production
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+ENV NODEJS_ORG_MIRROR=https://registry.npmmirror.com/-/binary/node
+RUN npm config set registry https://artsz.zte.com.cn/artifactory/api/npm/public-npm-virtual/ && \
+    npm config set proxy ${HTTP_PROXY} && \
+    npm config set https-proxy ${HTTPS_PROXY} && \
+    npm config set noproxy ${NO_PROXY} && \
+    echo "no_proxy=localhost,127.0.0.1,10.0.0.0/8,artsz.zte.com.cn" >> ~/.npmrc && \
+    echo "unsafe-perm=true" >> ~/.npmrc
 
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/package.json
 RUN npm ci --omit=dev --workspace=@claude-code-router/core --include-workspace-root=false \
   && npm cache clean --force
 
-FROM ${RUNTIME_NODE_IMAGE} AS runtime
-ENV NODE_ENV=production \
-    CCR_DATA_DIR=/data \
-    CCR_WEB_HOST=127.0.0.1 \
-    CCR_WEB_PORT=3459 \
-    CCR_NGINX_PORT=8080 \
-    CCR_GATEWAY_HOST=127.0.0.1 \
-    CCR_GATEWAY_PORT=3456 \
-    CCR_GATEWAY_CORE_PORT=3457 \
-    CCR_PUBLIC_HOST=127.0.0.1 \
-    CCR_PUBLIC_PORT=3458
-
+# ============================================================
+# Stage 2: Core server runtime (no nginx)
+# ============================================================
+FROM ${RUNTIME_NODE_IMAGE} AS core
 WORKDIR /app
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates libstdc++6 nginx \
-  && rm -rf /var/lib/apt/lists/* \
-  && rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf \
-  && rm -rf \
-    /opt/yarn-* \
-    /usr/local/bin/corepack \
-    /usr/local/bin/npm \
-    /usr/local/bin/npx \
-    /usr/local/bin/yarn \
-    /usr/local/bin/yarnpkg \
-    /usr/local/include/node \
-    /usr/local/lib/node_modules/corepack \
-    /usr/local/lib/node_modules/npm \
-    /usr/local/share/doc \
-    /usr/local/share/man
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+ENV NODEJS_ORG_MIRROR=https://registry.npmmirror.com/-/binary/node
+RUN npm config set registry https://artsz.zte.com.cn/artifactory/api/npm/public-npm-virtual/ && \
+    npm config set proxy ${HTTP_PROXY} && \
+    npm config set https-proxy ${HTTPS_PROXY} && \
+    npm config set noproxy ${NO_PROXY} && \
+    echo "no_proxy=localhost,127.0.0.1,10.0.0.0/8,artsz.zte.com.cn" >> ~/.npmrc && \
+    echo "unsafe-perm=true" >> ~/.npmrc
 
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/package.json
 COPY --from=production-deps /app/node_modules node_modules
 
 COPY --from=build /app/packages/core/dist packages/core/dist
-COPY --from=build /app/packages/ui/dist/renderer /usr/share/nginx/html
-COPY docker/entrypoint.sh /usr/local/bin/ccr-docker-entrypoint
-COPY docker/pm2.config.cjs docker/pm2.config.cjs
+COPY docker/pm2.config.cjs /app/docker/pm2.config.cjs
+COPY docker/core-entrypoint.sh /usr/local/bin/ccr-core-entrypoint
+RUN chmod +x /usr/local/bin/ccr-core-entrypoint
 
-RUN chmod +x /usr/local/bin/ccr-docker-entrypoint \
-  && mkdir -p /data /run/nginx /var/lib/nginx /var/log/nginx
-
-VOLUME ["/data"]
-EXPOSE 8080
+EXPOSE 3456 3457 3459
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:' + (process.env.CCR_NGINX_PORT || '8080') + '/').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:' + (process.env.CCR_GATEWAY_PORT || '3456') + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
-ENTRYPOINT ["ccr-docker-entrypoint"]
+ENTRYPOINT ["ccr-core-entrypoint"]
+
+# ============================================================
+# Stage 3: Nginx sidecar with UI assets
+# ============================================================
+FROM nginx:1.31-alpine AS nginx
+COPY --from=build /app/packages/ui/dist/renderer /usr/share/nginx/html
+COPY docker/nginx.default.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:80/health || exit 1

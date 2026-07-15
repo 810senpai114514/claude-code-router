@@ -1,15 +1,61 @@
 services:
-  ccr:
+  ccr-core:
     build:
       context: .
       dockerfile: Dockerfile
-    image: claude-code-router:local
+      target: core
+      args:
+        - HTTP_PROXY=${HTTP_PROXY}
+        - HTTPS_PROXY=${HTTPS_PROXY}
+        - NO_PROXY=${NO_PROXY}
+    image: ccr-core:local
+    container_name: ccr-dev31-core
     ports:
-      # Publish only Nginx. Internal web/gateway listeners stay inside the container.
-      - "3458:8080"
+      - "11656:3456"   # gateway (LLM API)
+      - "11657:3457"   # core gateway (内部)
     volumes:
-      - ccr-data:/data
+      - ./config.json:/data/.claude-code-router/config.json:ro
+    environment:
+      - CCR_DATA_DIR=/data
+      - CCR_GATEWAY_HOST=0.0.0.0
+      - CCR_GATEWAY_PORT=3456
+      - CCR_GATEWAY_CORE_PORT=3457
+      - CCR_WEB_HOST=0.0.0.0
+      - CCR_WEB_PORT=3459
+      - CCR_PUBLIC_HOST=0.0.0.0
+      - CCR_PUBLIC_PORT=3458
+      - NODE_ENV=production
+      - ZTE_APIKEY=${ZTE_APIKEY}
+      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.CCR_GATEWAY_PORT || '3456') + '/health').then(r => process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
-volumes:
-  ccr-data:
+  ccr-nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: nginx
+      args:
+        - HTTP_PROXY=${HTTP_PROXY}
+        - HTTPS_PROXY=${HTTPS_PROXY}
+        - NO_PROXY=${NO_PROXY}
+    image: ccr-nginx:local
+    container_name: ccr-dev31-nginx
+    ports:
+      - "11610:80"     # web UI + 反向代理入口
+    depends_on:
+      - ccr-core
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
